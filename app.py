@@ -24,7 +24,6 @@ from config import (
 )
 from data_export import guardar_ensayo, resumen_texto
 from serial_reader import LectorSerial
-#from simulador_serial import SimuladorSerial as LectorSerial
 from state import EstadoEnsayo
 from utils import puertos_disponibles, promedio_robusto
 
