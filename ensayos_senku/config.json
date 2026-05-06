@@ -1,0 +1,17 @@
+{
+  "puerto": "/dev/pts/4",
+  "baudrate": 115200,
+  "factor_escala": 109324.0,
+  "motor_nombre": "Senku_1",
+  "motor_diametro": "20",
+  "motor_longitud": "100",
+  "motor_peso_prop": "0.100",
+  "motor_peso_total": "0.150",
+  "rango_esperado_n": 5.0,
+  "umbral_ignicion_pct": 1.0,
+  "umbral_apagado_pct": 1.0,
+  "tiempo_minimo_s": 5.0,
+  "buffer_pre_s": 1.0,
+  "kalman_q": 0.1,
+  "kalman_r": 200.0
+}
