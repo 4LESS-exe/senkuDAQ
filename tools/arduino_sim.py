@@ -11,6 +11,8 @@ Workflow:
     3. Hacer TARA en la GUI (sensor en reposo)
     4. Presionar Enter aquí para disparar un ensayo
     5. Repetir desde paso 4 cuantas veces se quiera
+
+Actualmente no hace nada debido a que se cambio el metodo a wireless_reader.py, pero se mantiene como referencia para futuras pruebas con puerto serial.
 """
  
 import argparse

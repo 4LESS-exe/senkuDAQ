@@ -4,6 +4,9 @@ serial_reader.py — Hilo dedicado a la lectura del puerto serial.
 El lector deposita floats válidos en una queue thread-safe (self.cola).
 Ignora ceros (señal de error del HX711) y líneas corruptas.
 
+Se cambio el metodo a wireless_reader.py, actualmente serial reader.py es un "dummy" para mantener compatibilidad con app.py, 
+pero ya no realiza ninguna operación de lectura serial.
+
 """
 
 import threading

@@ -28,8 +28,8 @@ BUFFER_GRAFICO   = 500   # puntos visibles en el gráfico en tiempo real
 # ---------------------------------------------------------------------------
 
 CONFIG_DEFAULT = {
-    "puerto":               "",
-    "baudrate":             115200,
+    "host_wifi":            "127.0.0.1",
+    "puerto_tcp":           8080,
     "factor_escala":        109324.0,
     # Motor
     "motor_nombre":         "Senku_1",
@@ -38,11 +38,11 @@ CONFIG_DEFAULT = {
     "motor_peso_prop":      "0.100",
     "motor_peso_total":     "0.150",
     # Umbrales (como % del rango esperado)
-    "rango_esperado_n":     10.0,   # Fuerza máxima esperada [N]
-    "umbral_ignicion_pct":  5.0,    # % del rango para detectar ignición
-    "umbral_apagado_pct":   2.0,    # % del rango para detectar fin de empuje
-    "tiempo_minimo_s":      0.3,    # s mínimos de quemado (evita falsos positivos)
-    "buffer_pre_s":         1.0,    # s de pre-ignición a conservar
+    "rango_esperado_n":     10.0,   
+    "umbral_ignicion_pct":  5.0,    
+    "umbral_apagado_pct":   2.0,    
+    "tiempo_minimo_s":      0.3,    
+    "buffer_pre_s":         1.0,    
 }
 
 # ---------------------------------------------------------------------------

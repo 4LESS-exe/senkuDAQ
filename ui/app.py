@@ -1,6 +1,6 @@
 """
 app.py — Ventana principal de SENKU DAQ (PyQt6 + PyQtGraph).
-
+Versión refactorizada para control centralizado mediante Máquina de Estados.
 """
 
 import queue
@@ -19,14 +19,20 @@ from PyQt6.QtWidgets import (
     QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
-from config import (
+from core.config import (
     APP_VERSION, BUFFER_GRAFICO, TICK_MS, N_LECTURAS_CAL, C,
     cargar_config, guardar_config,
 )
-from data_export import guardar_ensayo, resumen_texto
-from serial_reader import LectorSerial
-from state import EstadoEnsayo
-from utils import puertos_disponibles, promedio_robusto
+from core.data_export import guardar_ensayo, resumen_texto
+from core.wireless_reader import LectorWireless
+from core.utils import puertos_disponibles, promedio_robusto
+from ui.widgets import _Campo, _css_btn, _css_entry, _css_combo
+
+# Nuevas importaciones de la máquina de estados centralizada
+from core.state import MaquinaEstado, TransicionInvalida
+from core.state import (DESCONECTADO, CONECTADO, ESPERANDO,
+                        ARMADO, QUEMANDO, PAUSADO,
+                        RECONECTANDO, FINALIZADO)
 
 
 # ---------------------------------------------------------------------------
@@ -66,70 +72,6 @@ def _clase_nfpa(impulso_ns: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Helpers de estilo Qt
-# ---------------------------------------------------------------------------
-
-def _css_btn(bg: str, fg: str = "#f0f0f0") -> str:
-    hover: str = QColor(bg).darker(120).name()
-    return (
-        f"QPushButton {{"
-        f"  background:{bg}; color:{fg}; border:none;"
-        f"  font-family:Courier; font-size:10pt; font-weight:bold;"
-        f"  padding:6px 10px; border-radius:3px;"
-        f"}}"
-        f"QPushButton:hover {{ background:{hover}; }}"
-        f"QPushButton:disabled {{ background:#aaaaaa; color:#dddddd; }}"
-    )
-
-def _css_entry() -> str:
-    return (
-        f"QLineEdit {{"
-        f"  background:{C['bg']}; color:{C['text']};"
-        f"  border:1px solid {C['border']}; border-radius:2px;"
-        f"  font-family:Courier; font-size:10pt; padding:2px 4px;"
-        f"}}"
-        f"QLineEdit:focus {{ border-color:{C['accent']}; }}"
-    )
-
-def _css_combo() -> str:
-    return (
-        f"QComboBox {{"
-        f"  background:{C['bg']}; color:{C['text']};"
-        f"  border:1px solid {C['border']}; border-radius:2px;"
-        f"  font-family:Courier; font-size:10pt; padding:2px 4px;"
-        f"}}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Widget campo etiqueta + entrada
-# ---------------------------------------------------------------------------
-
-class _Campo(QWidget):
-    def __init__(self, etiqueta: str, valor: str, solo_lectura: bool = False, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 2, 14, 2)
-        lbl = QLabel(etiqueta)
-        lbl.setFixedWidth(160)
-        lbl.setStyleSheet(f"color:{C['text_dim']}; font-family:Courier; font-size:9pt;")
-        self.entry = QLineEdit(valor)
-        self.entry.setStyleSheet(_css_entry())
-        self.entry.setFixedWidth(110)
-        if solo_lectura:
-            self.entry.setReadOnly(True)
-        lay.addWidget(lbl)
-        lay.addWidget(self.entry)
-        lay.addStretch()
-
-    def get(self) -> str:
-        return self.entry.text()
-
-    def set(self, valor: str) -> None:
-        self.entry.setText(valor)
-
-
-# ---------------------------------------------------------------------------
 # Ventana principal
 # ---------------------------------------------------------------------------
 
@@ -145,9 +87,12 @@ class AppDAQ(QMainWindow):
 
         self.cfg = cargar_config()
 
-        # Estado
-        self.estado: str                             = EstadoEnsayo.DESCONECTADO
-        self.lector: LectorSerial | None             = None
+        # Instanciación de la Máquina de Estados y registro de Observer
+        self._maquina = MaquinaEstado()
+        self._maquina.agregar_observer(self._on_cambio_estado)
+        
+        # Atributos de Control y Buffers
+        self.lector: LectorWireless | None           = None
         self.valor_cero: float                       = 0.0
         self.datos_ensayo: list[tuple[float, float]] = []
         self.tiempo_ignicion: float                  = 0.0
@@ -155,13 +100,16 @@ class AppDAQ(QMainWindow):
         self.t_pausa_inicio: float                   = 0.0
         self.t_pausa_acum: float                     = 0.0
         self._tara_en_progreso: bool                = False
+        self.señal_conexion_anterior: int            = 0
 
         # Buffer gráfico en tiempo real
         self._y_buf: deque[float] = deque([0.0] * BUFFER_GRAFICO, maxlen=BUFFER_GRAFICO)
         self._t_relativo: float = 0.0
 
         self._construir_ui()
-        self._actualizar_estado_ui()
+        
+        # Sincronización inicial de la interfaz con el estado base (DESCONECTADO)
+        self._actualizar_botones(DESCONECTADO)
 
         self._timer = QTimer(self)
         self._timer.setInterval(TICK_MS)
@@ -213,10 +161,6 @@ class AppDAQ(QMainWindow):
         self._construir_panel_izq()
         self._construir_grafico(der_lay)
 
-    # -----------------------------------------------------------------------
-    # Helpers panel izquierdo
-    # -----------------------------------------------------------------------
-
     def _seccion(self, texto: str) -> None:
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -243,10 +187,6 @@ class AppDAQ(QMainWindow):
         self._panel_izq_lay.addWidget(wrapper)
         return btn
 
-    # -----------------------------------------------------------------------
-    # Panel izquierdo
-    # -----------------------------------------------------------------------
-
     def _construir_panel_izq(self) -> None:
         p: QVBoxLayout = self._panel_izq_lay
 
@@ -265,44 +205,17 @@ class AppDAQ(QMainWindow):
         p.addWidget(subtitulo)
 
         # ---- Conexión ----
-        self._seccion("CONEXIÓN SERIAL")
+        self._seccion("CONEXIÓN WIRELESS")
 
-        puerto_w = QWidget()
-        puerto_w.setStyleSheet(f"background:{C['panel']};")
-        pl = QHBoxLayout(puerto_w)
-        pl.setContentsMargins(14, 2, 14, 2)
-        lp = QLabel("Puerto")
-        lp.setFixedWidth(160)
-        lp.setStyleSheet(f"color:{C['text_dim']}; font-family:Courier; font-size:9pt;")
-        self._combo_puerto = QComboBox()
-        self._combo_puerto.setStyleSheet(_css_combo())
-        self._combo_puerto.setFixedWidth(110)
-        self._combo_puerto.setEditable(True)
-        self._combo_puerto.addItems(puertos_disponibles())
-        if self.cfg.get("puerto"):
-            self._combo_puerto.setCurrentText(self.cfg["puerto"])
-        pl.addWidget(lp); pl.addWidget(self._combo_puerto); pl.addStretch()
-        p.addWidget(puerto_w)
-
-        baud_w = QWidget()
-        baud_w.setStyleSheet(f"background:{C['panel']};")
-        bl = QHBoxLayout(baud_w)
-        bl.setContentsMargins(14, 2, 14, 2)
-        lb = QLabel("Baudrate")
-        lb.setFixedWidth(160)
-        lb.setStyleSheet(f"color:{C['text_dim']}; font-family:Courier; font-size:9pt;")
-        self._combo_baud = QComboBox()
-        self._combo_baud.setStyleSheet(_css_combo())
-        self._combo_baud.setFixedWidth(110)
-        for b in ["9600", "57600", "115200", "230400", "500000"]:
-            self._combo_baud.addItem(b)
-        self._combo_baud.setCurrentText(str(self.cfg.get("baudrate", 115200)))
-        bl.addWidget(lb); bl.addWidget(self._combo_baud); bl.addStretch()
-        p.addWidget(baud_w)
+        self._f_host = _Campo("Host / IP", self.cfg.get("host_wifi", "127.0.0.1"))
+        self._f_port = _Campo("Puerto TCP", str(self.cfg.get("puerto_tcp", 8080)))
+        
+        p.addWidget(self._f_host)
+        p.addWidget(self._f_port)
 
         self._btn_conectar: QPushButton = self._boton("CONECTAR", self._accion_conectar, C["blue"])
 
-        # ---- Motor ----
+        # ---- Datos del Motor ----
         self._seccion("DATOS DEL MOTOR")
         self._f_nombre   = _Campo("Nombre",          self.cfg["motor_nombre"])
         self._f_diam     = _Campo("Diámetro (mm)",   self.cfg["motor_diametro"])
@@ -340,10 +253,6 @@ class AppDAQ(QMainWindow):
         )
         p.addWidget(self._lbl_estado_live)
         p.addStretch()
-
-    # -----------------------------------------------------------------------
-    # Gráfico PyQtGraph
-    # -----------------------------------------------------------------------
 
     def _construir_grafico(self, lay: QVBoxLayout) -> None:
         barra = QWidget()
@@ -383,11 +292,9 @@ class AppDAQ(QMainWindow):
         self._plot_widget.getAxis("left").setPen(pg.mkPen(C["border"]))
         self._plot_widget.getAxis("bottom").setPen(pg.mkPen(C["border"]))
 
-        # Curvas principales
         self._curve_live = self._plot_widget.plot(pen=pg.mkPen(C["plot_line"], width=2))
         self._curve_rec  = self._plot_widget.plot(pen=pg.mkPen(C["green"], width=2.5))
 
-        # Umbrales
         self._line_ign_thr = pg.InfiniteLine(
             pos=0, angle=0,
             pen=pg.mkPen(C["accent2"], width=1, style=Qt.PenStyle.DashLine))
@@ -397,9 +304,6 @@ class AppDAQ(QMainWindow):
         self._plot_widget.addItem(self._line_ign_thr)
         self._plot_widget.addItem(self._line_apg_thr)
 
-        # --- Anotaciones post-ensayo ---
-
-        # Área sombreada bajo la curva de ensayo
         self._curve_fill_base = self._plot_widget.plot([0], [0], pen=pg.mkPen(None))
         fill_color = QColor(C["green"])
         fill_color.setAlpha(45)
@@ -408,8 +312,6 @@ class AppDAQ(QMainWindow):
             brush=pg.mkBrush(fill_color))
         self._plot_widget.addItem(self._fill_impulso)
 
-        # Línea vertical de ignición (t = ts[0], que típicamente es negativo
-        # si hay pre-buffer, pero en datos_ensayo ya está referenciado a 0)
         self._vline_ignicion = pg.InfiniteLine(
             pos=0, angle=90,
             pen=pg.mkPen(C["accent"], width=1.5, style=Qt.PenStyle.DashLine),
@@ -418,7 +320,6 @@ class AppDAQ(QMainWindow):
                        "movable": False, "position": 0.93})
         self._plot_widget.addItem(self._vline_ignicion)
 
-        # Línea vertical de fin de empuje
         self._vline_fin = pg.InfiniteLine(
             pos=1, angle=90,
             pen=pg.mkPen(C["blue"], width=1.5, style=Qt.PenStyle.DashLine),
@@ -427,7 +328,6 @@ class AppDAQ(QMainWindow):
                        "movable": False, "position": 0.80})
         self._plot_widget.addItem(self._vline_fin)
 
-        # Cuadro de métricas flotante (anclado esquina superior derecha del gráfico)
         self._text_metricas = pg.TextItem(
             text="", anchor=(1, 0), color=C["text"],
             fill=pg.mkBrush(QColor(C["plot_bg"]).darker(103)))
@@ -443,14 +343,77 @@ class AppDAQ(QMainWindow):
             item.setVisible(visible)
 
     # =======================================================================
-    # TICK PRINCIPAL
+    # ARQUITECTURA DE EVENTOS Y CONTROL DE ESTADO (OBSERVER)
+    # =======================================================================
+
+    def _on_cambio_estado(self, anterior: str, nuevo: str) -> None:
+        """Slot del Observer central que responde a las transiciones validadas."""
+        self._actualizar_botones(nuevo)
+        
+        # Mapeo cromático industrial para el banner de estado live
+        color_map = {
+            DESCONECTADO: C["text_dim"], CONECTADO: C["blue"], ESPERANDO: C["green"],
+            ARMADO: C["accent2"], QUEMANDO: C["accent"], PAUSADO: C["accent2"],
+            RECONECTANDO: C["accent"], FINALIZADO: C["green"]
+        }
+        color = color_map.get(nuevo, C["text_dim"])
+        
+        # Adaptación del tag visual para el quemado activo
+        lbl_texto = f"{nuevo} 🔥" if nuevo == QUEMANDO else (f"{nuevo} ⏸" if nuevo == PAUSADO else nuevo)
+        self._lbl_estado_live.setText(lbl_texto)
+        self._lbl_estado_live.setStyleSheet(
+            f"color:{color}; font-family:Courier; font-size:11pt; font-weight:bold;"
+            f"padding:15px 0 25px 0; background:{C['panel']};"
+        )
+        
+        if nuevo == RECONECTANDO:
+            self._iniciar_secuencia_reconexion()
+        if nuevo == FINALIZADO:
+            self._dibujar_anotaciones_post_ensayo()
+
+    def _actualizar_botones(self, estado: str) -> None:
+        """Habilita o deshabilita los controles periféricos según el estado actual."""
+        self._btn_conectar.setText("DESCONECTAR" if estado != DESCONECTADO else "CONECTAR")
+        self._btn_tara.setEnabled(self._maquina.puede_tarar())
+        self._btn_calibrar.setEnabled(self._maquina.puede_calibrar())
+        self._btn_armar.setEnabled(estado in [ESPERANDO, ARMADO])
+        self._btn_armar.setText("DESARMAR" if estado == ARMADO else "ARMAR ENSAYO")
+        self._btn_pausa.setEnabled(estado in [QUEMANDO, PAUSADO])
+        self._btn_guardar.setEnabled(estado == FINALIZADO)
+
+        self._lbl_titulo_motor.setText(f"{self._f_nombre.get()} · {self._f_diam.get()}mm")
+
+    def _iniciar_secuencia_reconexion(self) -> None:
+        """Stub temporal para la lógica de reenganche del socket inalámbrico (Paso 4)."""
+        pass
+
+    # =======================================================================
+    # TICK PRINCIPAL Y GESTIÓN DE PÉRDIDA DE SEÑAL
     # =======================================================================
 
     def _tick(self) -> None:
+        if self.lector:
+            if self.lector.señal_conexion < 20 and self.señal_conexion_anterior >= 20:
+                self._manejar_perdida_conexion()
+            self.señal_conexion_anterior = self.lector.señal_conexion
+
         if self.lector is None:
             return
         if getattr(self.lector, "bloqueo_gui", False):
             return
+
+        # Análisis preventivo ante fallos críticos del enlace de red inalámbrica
+        if self.lector and self.lector.señal_conexion == 0:
+            if self._maquina.requiere_datos_seguros():
+                try: 
+                    self._maquina.transicionar(RECONECTANDO)
+                except TransicionInvalida: 
+                    pass
+            elif self._maquina.estado == ARMADO:
+                try: 
+                    self._maquina.transicionar(DESCONECTADO)
+                except TransicionInvalida: 
+                    pass
 
         nuevos = []
         while True:
@@ -471,14 +434,14 @@ class AppDAQ(QMainWindow):
 
         self._actualizar_grafico()
 
+    def _manejar_perdida_conexion(self) -> None:
+        print("[!] Alerta: Pérdida crítica de señal inalámbrica detectada en la estación de tierra.")
+
     # =======================================================================
     # PROCESAMIENTO DE MUESTRAS
     # =======================================================================
 
     def _procesar_muestra(self, val_filtrado: float) -> None:
-        """
-        Convierte la señal filtrada y gestiona la lógica de grabación automática.
-        """
         factor: float     = self._factor()
         diferencia: float = self.valor_cero - val_filtrado
         empuje_n: float   = (diferencia / factor) * 9.80665
@@ -492,14 +455,14 @@ class AppDAQ(QMainWindow):
         umbral_ign: float = self._rango() * (self._ign_pct() / 100.0)
         umbral_apg: float = self._rango() * (self._apg_pct() / 100.0)
 
-        if self.estado == EstadoEnsayo.ARMADO:
+        if self._maquina.estado == ARMADO:
             self.buffer_pre.append((t_ahora, empuje_n))
             while self.buffer_pre and (t_ahora - self.buffer_pre[0][0]) > 1.0:
                 self.buffer_pre.popleft()
             if empuje_n >= umbral_ign:
                 self._ignicion_detectada(t_ahora)
 
-        elif self.estado == EstadoEnsayo.QUEMANDO:
+        elif self._maquina.estado == QUEMANDO:
             t_corr: float = t_ahora - self.tiempo_ignicion - self.t_pausa_acum
             self.datos_ensayo.append((t_corr, empuje_n))
             self._t_relativo = t_corr
@@ -513,14 +476,13 @@ class AppDAQ(QMainWindow):
             self.datos_ensayo.append((t_abs - self.tiempo_ignicion, n_val))
         self.buffer_pre.clear()
         self._set_anotaciones_visibles(False)
-        self._set_estado(EstadoEnsayo.QUEMANDO)
+        self._maquina.transicionar(QUEMANDO)
         print(f"[🔥] IGNICIÓN a {time.strftime('%H:%M:%S')}")
 
     def _fin_quemado_detectado(self, t_corr: float) -> None:
         print(f"[🛑] Fin de empuje a los {t_corr:.3f}s")
-        self._set_estado(EstadoEnsayo.FINALIZADO)
+        self._maquina.transicionar(FINALIZADO)
         self._actualizar_grafico(forzar_ensayo=True)
-        self._dibujar_anotaciones_post_ensayo()
         resp: QMessageBox.StandardButton = QMessageBox.question(
             self, "Ensayo finalizado",
             f"Fin de empuje detectado a los {t_corr:.3f}s\n\n"
@@ -547,14 +509,10 @@ class AppDAQ(QMainWindow):
         clase: str      = _clase_nfpa(impulso)
         t_fin      = float(ts[-1])
 
-        # Posicionar líneas de evento
         self._vline_ignicion.setValue(float(ts[0]))
         self._vline_fin.setValue(t_fin)
-
-        # Base plana en y=0 para el FillBetweenItem
         self._curve_fill_base.setData(ts, np.zeros_like(ts))
 
-        # Texto de métricas en coordenadas del gráfico
         x_pos: float = t_fin + (t_fin - float(ts[0])) * 0.03
         y_pos: float = self._rango() * 1.10
         self._text_metricas.setText(
@@ -571,7 +529,7 @@ class AppDAQ(QMainWindow):
             f"RESULTADO — {self._f_nombre.get()} · Clase {clase}")
 
     # =======================================================================
-    # GRÁFICO (actualización en tiempo real)
+    # GRÁFICO
     # =======================================================================
 
     def _actualizar_grafico(self, forzar_ensayo: bool = False) -> None:
@@ -582,75 +540,78 @@ class AppDAQ(QMainWindow):
         self._line_ign_thr.setValue(umbral_ign)
         self._line_apg_thr.setValue(umbral_apg)
 
-        if self.estado in (EstadoEnsayo.QUEMANDO, EstadoEnsayo.PAUSADO) or forzar_ensayo:
+        if self._maquina.es_activo() or forzar_ensayo:
             if self.datos_ensayo:
                 ts: np.ndarray[tuple[Any, ...], np.dtype[Any]] = np.array([t for t, _ in self.datos_ensayo])
                 ns: np.ndarray[tuple[Any, ...], np.dtype[Any]] = np.array([n for _, n in self.datos_ensayo])
                 self._curve_rec.setData(ts, ns)
                 self._curve_live.setData([], [])
                 t_max = ts[-1]
-                self._plot_widget.setRange('x', -0.2, max(t_max * 1.15, 1.0), padding=0.0)
+                self._plot_widget.setXRange(-0.2, max(t_max * 1.15, 1.0), padding=0.0)
         else:
             buf = np.array(self._y_buf)
             n: int   = len(buf)
             xs: np.ndarray[tuple[Any, ...], np.dtype[np.float64]]  = np.linspace(-n * TICK_MS / 1000.0, 0, n)
             self._curve_live.setData(xs, buf)
             self._curve_rec.setData([], [])
-            self._plot_widget.setRange('x', xs[0], 0.2, padding=0.0)
+            self._plot_widget.setXRange(xs[0], 0.2, padding=0.0)
 
-        self._plot_widget.setRange('y', -rango * 0.05, rango * 1.15, padding=0.0)
+        self._plot_widget.setYRange(-rango * 0.05, rango * 1.15, padding=0.0)
 
     # =======================================================================
     # ACCIONES DE BOTONES
     # =======================================================================
 
     def _accion_conectar(self) -> None:
-        if self.estado != EstadoEnsayo.DESCONECTADO:
+        if self._maquina.estado != DESCONECTADO:
             if self.lector:
-                self.lector.detener()  # type: ignore
+                self.lector.detener()
                 self.lector = None
-            self._set_estado(EstadoEnsayo.DESCONECTADO)
+            try: 
+                self._maquina.transicionar(DESCONECTADO)
+            except TransicionInvalida: 
+                pass
             return
 
-        puerto: str = self._combo_puerto.currentText().strip()
-        if not puerto:
-            QMessageBox.warning(self, "Puerto vacío", "Selecciona un puerto serial.")
+        host = self._f_host.get().strip()
+        if not host:
+            QMessageBox.warning(self, "Campo vacío", "Por favor ingresa la dirección IP o Host.")
             return
+            
         try:
-            baud = int(self._combo_baud.currentText())
+            puerto_tcp = int(self._f_port.get().strip())
         except ValueError:
-            QMessageBox.critical(self, "Baudrate inválido",
-                                 "El baudrate debe ser un número entero.")
+            QMessageBox.critical(self, "Puerto inválido",
+                                 "El puerto TCP debe ser un número entero válido.")
             return
 
         self._btn_conectar.setText("Conectando...")
         self._btn_conectar.setEnabled(False)
 
-        # Cola para pasar el lector desde el hilo de fondo al principal
         _resultado: queue.Queue[Any] = queue.Queue()
 
         def _conectar() -> None:
-            lector = LectorSerial(puerto, baud)
+            # Uso de argumentos posicionales (host, puerto)
+            lector = LectorWireless(host, puerto_tcp)
             lector.start()
             time.sleep(3.2)
-            _resultado.put(lector)   # ← en vez de QTimer.singleShot
+            _resultado.put(lector)
 
-        def _conectar_ok(lector: LectorSerial) -> None:
+        def _conectar_ok(lector: LectorWireless) -> None:
             if lector.error:
                 QMessageBox.critical(self, "Error de conexión", lector.error)
                 self._btn_conectar.setText("CONECTAR")
                 self._btn_conectar.setEnabled(True)
                 return
             self.lector = lector
-            self._set_estado(EstadoEnsayo.CONECTADO)
+            self._maquina.transicionar(CONECTADO)
             self._guardar_cfg_actual()
             QMessageBox.information(
                 self, "Conectado",
-                f"Puerto {puerto} abierto a {baud} bps.\n\n"
+                f"Conectado a {host}:{puerto_tcp}\n\n"
                 "Establece la TARA antes de armar el ensayo.",
             )
 
-        # QTimer en el hilo principal que revisa la cola cada 100 ms
         self._timer_conexion = QTimer(self)
         def _poll() -> None:
             try:
@@ -665,7 +626,7 @@ class AppDAQ(QMainWindow):
         threading.Thread(target=_conectar, daemon=True).start()
 
     def _accion_tara(self) -> None:
-        if self.estado not in (EstadoEnsayo.CONECTADO, EstadoEnsayo.ESPERANDO):
+        if not self._maquina.puede_tarar():
             QMessageBox.warning(self, "No disponible",
                                 "Solo se puede establecer tara en CONECTADO o ESPERANDO.")
             return
@@ -677,12 +638,11 @@ class AppDAQ(QMainWindow):
                 self.tara_error.emit("El lector serial no está activo.")
                 return
             try:
-                # Wait up to 5 seconds for initial data to ensure serial is working
                 t0: float = time.time()
                 while self.lector.cola.empty() and time.time() - t0 < 5.0:
                     time.sleep(0.1)
                 if self.lector.cola.empty():
-                    raise RuntimeError("No se recibió data del puerto serial. Verifica la conexión y que el Arduino esté enviando datos.")
+                    raise RuntimeError("No se recibió data del puerto de red. Verifica el enlace inalámbrico.")
                 vals: list[float] = self.lector.leer_bloqueante(30, timeout=5.0)
                 media, std = promedio_robusto(vals)
                 self.valor_cero = media
@@ -691,8 +651,6 @@ class AppDAQ(QMainWindow):
                 self.tara_error.emit(str(e))
 
         threading.Thread(target=_hacer_tara, daemon=True).start()
-
-        # Fallback: reset button after 10 seconds if thread hangs
         self._tara_en_progreso = True
         self._timer_tara_timeout.start(10000)
 
@@ -715,25 +673,34 @@ class AppDAQ(QMainWindow):
 
     def _tara_ok(self, media: float, std: float) -> None:
         self._finalizar_tara()
+        
+        # Resetear UI antes de cualquier transición para evitar bloqueos
         self._btn_tara.setText("ESTABLECER TARA")
         self._btn_tara.setEnabled(True)
-        self._set_estado(EstadoEnsayo.ESPERANDO)
+        
+        # Solo pedir transición si realmente venimos de CONECTADO
+        if self._maquina.estado != ESPERANDO:
+            try:
+                self._maquina.transicionar(ESPERANDO)
+            except TransicionInvalida as e:
+                print(f"[!] Tara OK pero transición falló: {e}")
+                
         print(f"[✓] Tara establecida: {media:.1f}  (σ={std:.1f})")
         self._lbl_estado_live.setText(f"TARA: {media:.0f}")
 
     def _accion_calibrar(self) -> None:
-        if self.estado not in (EstadoEnsayo.CONECTADO, EstadoEnsayo.ESPERANDO):
+        if not self._maquina.puede_calibrar():
             QMessageBox.warning(self, "No disponible",
                                 "Conecta el sensor y establece la tara antes de calibrar.")
             return
-        if self.estado == EstadoEnsayo.QUEMANDO:
+        if self._maquina.es_activo():
             QMessageBox.warning(self, "Ensayo activo",
                                 "No se puede calibrar durante un ensayo.")
             return
         self._ventana_calibracion()
 
     def _accion_armar(self) -> None:
-        if self.estado == EstadoEnsayo.ESPERANDO:
+        if self._maquina.puede_armar():
             try:
                 rango = float(self._f_rango.get())
                 ign   = float(self._f_ign_pct.get())
@@ -750,21 +717,37 @@ class AppDAQ(QMainWindow):
             self._set_anotaciones_visibles(False)
             self._lbl_grafico_titulo.setText("EMPUJE EN TIEMPO REAL")
             self._guardar_cfg_actual()
-            self._set_estado(EstadoEnsayo.ARMADO)
+            
+            try:
+                self._maquina.transicionar(ARMADO)
+            except TransicionInvalida as e:
+                QMessageBox.warning(self, "Estado inválido", str(e))
+                return
+                
             ign_n: float = rango * (ign / 100.0)
             apg_n: float = rango * (apg / 100.0)
             print(f"[✓] ARMADO — Umbral ignición: {ign_n:.3f}N  |  Apagado: {apg_n:.3f}N")
-        elif self.estado == EstadoEnsayo.ARMADO:
-            self._set_estado(EstadoEnsayo.ESPERANDO)
+            
+        elif self._maquina.estado == ARMADO:
+            try:
+                self._maquina.transicionar(ESPERANDO)
+            except TransicionInvalida:
+                pass
 
     def _accion_pausa(self) -> None:
-        if self.estado == EstadoEnsayo.QUEMANDO:
+        if self._maquina.estado == QUEMANDO:
             self.t_pausa_inicio = time.time()
-            self._set_estado(EstadoEnsayo.PAUSADO)
+            try:
+                self._maquina.transicionar(PAUSADO)
+            except TransicionInvalida:
+                pass
             print("[⏸] ENSAYO PAUSADO")
-        elif self.estado == EstadoEnsayo.PAUSADO:
+        elif self._maquina.estado == PAUSADO:
             self.t_pausa_acum += time.time() - self.t_pausa_inicio
-            self._set_estado(EstadoEnsayo.QUEMANDO)
+            try:
+                self._maquina.transicionar(QUEMANDO)
+            except TransicionInvalida:
+                pass
             print(f"[▶] ENSAYO REANUDADO (pausa acumulada: {self.t_pausa_acum:.2f}s)")
 
     def _accion_guardar(self) -> None:
@@ -793,7 +776,7 @@ class AppDAQ(QMainWindow):
             return
         QMessageBox.information(self, "Ensayo guardado",
                                 resumen_texto(metricas, self._f_nombre.get()))
-        self._set_estado(EstadoEnsayo.ESPERANDO)
+        self._maquina.transicionar(ESPERANDO)
 
     # =======================================================================
     # VENTANA DE CALIBRACIÓN
@@ -822,8 +805,7 @@ class AppDAQ(QMainWindow):
         lay.addWidget(lbl_instr)
 
         lbl_estado = QLabel("Listo para iniciar.")
-        lbl_estado.setStyleSheet(
-            f"color:{C['text_dim']}; font-family:Courier; font-size:9pt;")
+        lbl_estado.setStyleSheet(f"color:{C['text_dim']}; font-family:Courier; font-size:9pt;")
         lay.addWidget(lbl_estado)
 
         barra = QProgressBar()
@@ -836,8 +818,7 @@ class AppDAQ(QMainWindow):
 
         lbl_result = QLabel("")
         lbl_result.setWordWrap(True)
-        lbl_result.setStyleSheet(
-            f"color:{C['green']}; font-family:Courier; font-size:10pt;")
+        lbl_result.setStyleSheet(f"color:{C['green']}; font-family:Courier; font-size:10pt;")
         lay.addWidget(lbl_result)
 
         estado_cal: dict[str, int | float | None] = {"paso": 0, "tara": None}
@@ -865,12 +846,9 @@ class AppDAQ(QMainWindow):
                         QTimer.singleShot(0, lambda: _error(str(e)))
 
                 def _tara_ok(media: float, std: float) -> None:
-                    lbl_estado.setText(
-                        f"Tara: {media:.1f}  (σ={std:.1f}, n={N_LECTURAS_CAL})")
-                    lbl_estado.setStyleSheet(
-                        f"color:{C['green']}; font-family:Courier; font-size:9pt;")
-                    lbl_instr.setText(
-                        "Paso 2: Ingresa la masa del peso patrón y colócalo sobre la celda.")
+                    lbl_estado.setText(f"Tara: {media:.1f}  (σ={std:.1f}, n={N_LECTURAS_CAL})")
+                    lbl_estado.setStyleSheet(f"color:{C['green']}; font-family:Courier; font-size:9pt;")
+                    lbl_instr.setText("Paso 2: Ingresa la masa del peso patrón y colócalo sobre la celda.")
                     estado_cal["paso"] = 1
                     btn.setEnabled(True)
                     btn.setText("Confirmar peso colocado →")
@@ -925,13 +903,7 @@ class AppDAQ(QMainWindow):
                         delta  = abs(media_c - tara)
                         factor_tent: float = delta / masa_kg if delta > 0 else 0.0
                         razon: float | int  = factor_tent / self._factor() if self._factor() else 1
-                        print(f"\n  [DIAGNÓSTICO CALIBRACIÓN]")
-                        print(f"    Tara cruda     : {tara:.1f}")
-                        print(f"    Cargado crudo  : {media_c:.1f}")
-                        print(f"    Delta crudo    : {delta:.1f}")
-                        print(f"    Masa (kg)      : {masa_kg:.4f}")
-                        print(f"    Factor tent.   : {factor_tent:.2f}")
-                        print(f"    Factor actual  : {self._factor():.2f}")
+                        
                         if delta < 500 or not (0.05 < razon < 20.0):
                             msg: str = (
                                 f"Resultado sospechoso.\n\nΔ crudo = {delta:.1f}\n"
@@ -940,8 +912,7 @@ class AppDAQ(QMainWindow):
                                 f"Verifica que el peso esté correctamente colocado.")
                             QTimer.singleShot(0, lambda m=msg: _advertencia(m))
                             return
-                        QTimer.singleShot(
-                            0, lambda f=factor_tent, s=std_c, d=delta: _carga_ok(f, s, d))
+                        QTimer.singleShot(0, lambda f=factor_tent, s=std_c, d=delta: _carga_ok(f, s, d))
                     except RuntimeError as e:
                         QTimer.singleShot(0, lambda: _error(str(e)))
 
@@ -950,12 +921,9 @@ class AppDAQ(QMainWindow):
                     self.cfg["factor_escala"] = nuevo_factor
                     guardar_config(self.cfg)
                     barra.setValue(100)
-                    lbl_result.setText(
-                        f"✓  Nuevo factor: {nuevo_factor:.2f}\n"
-                        f"   Δ crudo={delta:.0f}  σ={std_c:.1f}")
+                    lbl_result.setText(f"✓  Nuevo factor: {nuevo_factor:.2f}\n   Δ crudo={delta:.0f}  σ={std_c:.1f}")
                     lbl_estado.setText("Calibración completada.")
-                    lbl_estado.setStyleSheet(
-                        f"color:{C['green']}; font-family:Courier; font-size:9pt;")
+                    lbl_estado.setStyleSheet(f"color:{C['green']}; font-family:Courier; font-size:9pt;")
                     lbl_instr.setText("Puedes cerrar esta ventana.")
                     estado_cal["paso"] = 2
                     btn.setEnabled(True)
@@ -975,64 +943,16 @@ class AppDAQ(QMainWindow):
             btn.setEnabled(True)
             barra.setValue(50)
             lbl_estado.setText("Reintenta — revisa consola.")
-            lbl_estado.setStyleSheet(
-                f"color:{C['accent']}; font-family:Courier; font-size:9pt;")
+            lbl_estado.setStyleSheet(f"color:{C['accent']}; font-family:Courier; font-size:9pt;")
             QMessageBox.warning(dlg, "Advertencia", msg)
 
         def _error(msg: str) -> None:
             btn.setEnabled(True)
             lbl_estado.setText(f"Error: {msg}")
-            lbl_estado.setStyleSheet(
-                f"color:{C['accent']}; font-family:Courier; font-size:9pt;")
+            lbl_estado.setStyleSheet(f"color:{C['accent']}; font-family:Courier; font-size:9pt;")
 
         btn.clicked.connect(avanzar)
         dlg.exec()
-
-    # =======================================================================
-    # GESTIÓN DE ESTADO
-    # =======================================================================
-
-    def _set_estado(self, nuevo: str) -> None:
-        self.estado = nuevo
-        self._actualizar_estado_ui()
-
-    def _actualizar_estado_ui(self) -> None:
-        s: str = self.estado
-        color_map: dict[str, tuple[str, str]] = {
-            EstadoEnsayo.DESCONECTADO: (C["text_dim"],  "DESCONECTADO"),
-            EstadoEnsayo.CONECTADO:    (C["blue"],       "CONECTADO"),
-            EstadoEnsayo.ESPERANDO:    (C["green"],      "ESPERANDO"),
-            EstadoEnsayo.ARMADO:       (C["accent2"],    "ARMADO"),
-            EstadoEnsayo.QUEMANDO:     (C["accent"],     "QUEMANDO 🔥"),
-            EstadoEnsayo.PAUSADO:      (C["accent2"],    "PAUSADO ⏸"),
-            EstadoEnsayo.FINALIZADO:   (C["green"],      "FINALIZADO"),
-        }
-        color, texto = color_map.get(s, (C["text_dim"], s))
-        self._lbl_estado_live.setText(texto)
-        self._lbl_estado_live.setStyleSheet(
-            f"color:{color}; font-family:Courier; font-size:11pt; font-weight:bold;"
-            f"padding:15px 0 25px 0; background:{C['panel']};"
-        )
-
-        def st(btn: QPushButton, activo: bool) -> None: btn.setEnabled(activo)
-
-        st(self._btn_conectar,  True)
-        st(self._btn_tara,      s in (EstadoEnsayo.CONECTADO, EstadoEnsayo.ESPERANDO))
-        st(self._btn_calibrar,  s in (EstadoEnsayo.CONECTADO, EstadoEnsayo.ESPERANDO))
-        st(self._btn_armar,     s in (EstadoEnsayo.ESPERANDO, EstadoEnsayo.ARMADO))
-        st(self._btn_pausa,     s in (EstadoEnsayo.QUEMANDO,  EstadoEnsayo.PAUSADO))
-        st(self._btn_guardar,   s in (EstadoEnsayo.QUEMANDO,  EstadoEnsayo.PAUSADO,
-                                      EstadoEnsayo.FINALIZADO))
-
-        self._btn_conectar.setText(
-            "DESCONECTAR" if s != EstadoEnsayo.DESCONECTADO else "CONECTAR")
-        self._btn_armar.setText(
-            "DESARMAR" if s == EstadoEnsayo.ARMADO else "ARMAR ENSAYO")
-        self._btn_pausa.setText(
-            "REANUDAR" if s == EstadoEnsayo.PAUSADO else "PAUSAR")
-
-        self._lbl_titulo_motor.setText(
-            f"{self._f_nombre.get()} · {self._f_diam.get()}mm")
 
     # =======================================================================
     # HELPERS DE PARÁMETROS
@@ -1060,8 +980,8 @@ class AppDAQ(QMainWindow):
 
     def _guardar_cfg_actual(self) -> None:
         self.cfg.update({
-            "puerto":              self._combo_puerto.currentText(),
-            "baudrate":            int(self._combo_baud.currentText() or 115200),
+            "host_wifi":           self._f_host.get().strip(),
+            "puerto_tcp":          int(self._f_port.get().strip() or 8080),
             "factor_escala":       self._factor(),
             "motor_nombre":        self._f_nombre.get(),
             "motor_diametro":      self._f_diam.get(),
@@ -1081,7 +1001,7 @@ class AppDAQ(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent | None) -> None:
         assert event is not None
-        if self.estado in (EstadoEnsayo.QUEMANDO, EstadoEnsayo.ARMADO):
+        if self._maquina.estado in (QUEMANDO, ARMADO):
             resp: QMessageBox.StandardButton = QMessageBox.question(
                 self, "Ensayo activo",
                 "Hay un ensayo en curso.\n¿Salir de todos modos?",
@@ -1091,6 +1011,6 @@ class AppDAQ(QMainWindow):
                 return
         self._guardar_cfg_actual()
         if self.lector:
-            self.lector.detener()  # type: ignore
+            self.lector.detener()
         self._timer.stop()
         event.accept()

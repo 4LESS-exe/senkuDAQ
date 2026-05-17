@@ -20,8 +20,7 @@ Dependencias (instalar con pip):
 
 import sys
 from PyQt6.QtWidgets import QApplication
-from app import AppDAQ
-
+from ui.app import AppDAQ
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
