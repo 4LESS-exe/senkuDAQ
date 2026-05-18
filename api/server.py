@@ -87,7 +87,7 @@ def transicionar_seguro(nuevo_estado: str):
 # ===========================================================================
 
 class ConexionReq(BaseModel):
-    host: str = "127.0.0.1"
+    host: str = "192.168.4.1"
     puerto_tcp: int = 8080
 
 class CargaReq(BaseModel):

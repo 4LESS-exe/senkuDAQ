@@ -28,7 +28,7 @@ BUFFER_GRAFICO   = 500   # puntos visibles en el gráfico en tiempo real
 # ---------------------------------------------------------------------------
 
 CONFIG_DEFAULT = {
-    "host_wifi":            "127.0.0.1",
+    "host_wifi":            "192.168.4.1",
     "puerto_tcp":           8080,
     "factor_escala":        109324.0,
     # Motor

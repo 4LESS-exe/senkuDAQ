@@ -4,11 +4,18 @@ import UplotChart from './UplotChart';
 const API_URL = "http://127.0.0.1:8765/api/v1";
  
 const DEFAULT_CONFIG = {
-  host_wifi: "127.0.0.1", puerto_tcp: 8080,
-  motor_nombre: "Senku_1", motor_diametro: 20, motor_longitud: 100,
-  motor_peso_prop: 0.100, motor_peso_total: 0.150,
-  rango_esperado_n: 10.0, umbral_ignicion_pct: 5.0, umbral_apagado_pct: 2.0,
-  tiempo_minimo_s: 0.3, factor_escala: 109324.0
+  host_wifi: "192.168.4.1", 
+  puerto_tcp: 8080,
+  motor_nombre: "Senku_1", 
+  motor_diametro: 20, 
+  longitud_mm: 100, // Ajustado según GuardarReq
+  motor_peso_prop: 0.100, 
+  motor_peso_total: 0.150,
+  rango_esperado_n: 10.0, 
+  umbral_ignicion_pct: 5.0, 
+  umbral_apagado_pct: 2.0,
+  tiempo_minimo_s: 0.3, 
+  factor_escala: 109324.0
 };
  
 const InputField = ({ label, configKey, type = "text", cfg, updateCfg }) => (
@@ -38,7 +45,7 @@ export default function App() {
   const [empujeActual, setEmpujeActual] = useState(0.0);
  
   // Modal de confirmación al finalizar ensayo
-  const [modalFin, setModalFin] = useState({ open: false, impulso: null, clase: null });
+  const [modalFin, setModalFin] = useState({ open: false, impulso: null, empujeMax: null });
  
   const tokenRef = useRef(null);
   useEffect(() => { tokenRef.current = token; }, [token]);
@@ -48,7 +55,7 @@ export default function App() {
  
   const [cfg, setCfg] = useState(() => {
     const saved = safeLocalStorage.get('senkudaq_config');
-    return saved ? JSON.parse(saved) : DEFAULT_CONFIG;
+    return saved ? { ...DEFAULT_CONFIG, ...JSON.parse(saved) } : DEFAULT_CONFIG;
   });
  
   const updateCfg = (key, value) => {
@@ -185,7 +192,10 @@ export default function App() {
       setChartData([[], []]);
       return;
     }
-    const res = await req("POST", "/conexion", { host: cfg.host_wifi, puerto_tcp: Number(cfg.puerto_tcp) });
+    const res = await req("POST", "/conexion", { 
+      host: cfg.host_wifi, 
+      puerto_tcp: Number(cfg.puerto_tcp) 
+    });
     if (res) {
       setToken(res.session_token);
       setTimeout(() => req("POST", "/tara"), 500);
@@ -233,11 +243,10 @@ export default function App() {
     if (res) alert(`Ensayo guardado.\nImpulso: ${res.impulso_ns.toFixed(2)} N·s\nClase NFPA: ${res.clase_nfpa}\nRuta: ${res.ruta_dir}`);
   };
  
-  // Rechazar: descarta el ensayo y vuelve a ESPERANDO sin guardar nada
+  // Rechazar: descarta el ensayo y vuelve a ESPERANDO de forma limpia relativizada
   const handleRechazar = async () => {
     if (!window.confirm("¿Seguro que deseas descartar las curvas de este ensayo? Los datos se perderán.")) return;
     
-    // Cambiamos el método a "POST" y la ruta a "/ensayo/descartar"
     const res = await req("POST", "/ensayo/descartar");
     
     if (res) {
@@ -285,9 +294,7 @@ export default function App() {
     }
   };
  
-  const empujeColor = umbralIgnN !== null && empujeActual >= umbralIgnN
-    ? '#1e8449'
-    : '#c0392b';
+  const empujeColor = umbralIgnN !== null && empujeActual >= umbralIgnN ? '#1e8449' : '#c0392b';
  
   return (
     <div className="min-h-screen p-2 md:p-4 flex flex-col gap-4 max-w-6xl mx-auto font-mono text-gray-800">
@@ -295,7 +302,7 @@ export default function App() {
       <header className="bg-[#e0e0e0] p-3 rounded shadow-sm border border-[#b0b0b0] flex justify-between items-center">
         <div>
           <h1 className="text-xl font-bold text-[#c0392b]">SENKU DAQ</h1>
-          <p className="text-xs text-gray-600">v2.1 · PWA Client · USACH</p>
+          <p className="text-xs text-gray-600">v2.2 · Ground Station · USACH</p>
         </div>
         <div className="text-right flex items-center gap-4">
           <div
@@ -322,8 +329,13 @@ export default function App() {
             </span>
           </div>
  
-          <button onClick={handleConectar} className="w-full bg-[#1a5276] hover:bg-blue-800 text-white font-bold py-2 rounded text-sm transition-colors mb-2">
-            {estado !== "DESCONECTADO" ? "DESCONECTAR" : "CONECTAR"}
+          {/* SECCIÓN DE RED REINCORPORADA */}
+          <div className="text-[10px] font-bold text-gray-500 mb-1 border-b border-gray-300 uppercase">Configuración de Red</div>
+          <InputField label="Host / IP ESP" configKey="host_wifi" cfg={cfg} updateCfg={updateCfg} />
+          <InputField label="Puerto TCP" configKey="puerto_tcp" type="number" cfg={cfg} updateCfg={updateCfg} />
+
+          <button onClick={handleConectar} className="w-full bg-[#1a5276] hover:bg-blue-800 text-white font-bold py-2 rounded text-sm transition-colors mt-1 mb-2">
+            {estado !== "DESCONECTADO" ? "DESCONECTAR" : "CONECTAR HARDWARE"}
           </button>
  
           <div className="text-[10px] font-bold text-gray-500 mb-1 border-b border-gray-300 uppercase">Datos del Motor</div>
@@ -331,9 +343,11 @@ export default function App() {
           <InputField label="Diámetro (mm)"  configKey="motor_diametro"  cfg={cfg} updateCfg={updateCfg} />
           <InputField label="Longitud (mm)"  configKey="motor_longitud"  cfg={cfg} updateCfg={updateCfg} />
           <InputField label="Peso prop (kg)" configKey="motor_peso_prop" cfg={cfg} updateCfg={updateCfg} />
+          <InputField label="Peso tot (kg)"  configKey="motor_peso_total" cfg={cfg} updateCfg={updateCfg} />
  
           <div className="text-[10px] font-bold text-gray-500 mb-1 mt-2 border-b border-gray-300 uppercase">Parámetros de Ensayo</div>
           <InputField label="Rango máx (N)"  configKey="rango_esperado_n" cfg={cfg} updateCfg={updateCfg} />
+          <InputField label="Tiempo mín (s)" configKey="tiempo_minimo_s" cfg={cfg} updateCfg={updateCfg} />
  
           {/* Umbral ignición con valor N al costado */}
           <div className="flex justify-between items-center bg-gray-100 p-1 rounded">
