@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import UplotChart from './UplotChart';
  
-const API_URL = "http://127.0.0.1:8765/api/v1";
+const API_URL = `http://${window.location.hostname}:8765/api/v1`;
  
 const DEFAULT_CONFIG = {
   host_wifi: "192.168.4.1", 
